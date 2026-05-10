@@ -137,8 +137,10 @@ async def chat(req: ChatRequest):
         response = chat_session.send_message(req.message) 
         reply = response.text
     except Exception as e:
+        # This print statement will show up in your Render Logs!
+        print(f"DEBUG: Detailed Gemini Error: {type(e).__name__} - {e}")
         logger.exception("Gemini API error")
-        raise HTTPException(status_code=502, detail=f"AI error: {str(e)}")
+        raise HTTPException(status_code=502, detail="AI Communication Error")
 
     # 3. Save to MongoDB (if connected)
     if db is not None:
