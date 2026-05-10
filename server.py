@@ -18,7 +18,7 @@ load_dotenv(ROOT_DIR / '.env')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ── MongoDB Setup (With Safety Net) ──────────────────────────────────────────
+# ── MongoDB Setup ────────────────────────────────────────────────────────────
 mongo_url = os.environ.get('MONGO_URL')
 db_name = os.environ.get('DB_NAME', 'portfolio')
 
@@ -26,21 +26,33 @@ if mongo_url:
     try:
         client = AsyncIOMotorClient(mongo_url)
         db = client[db_name]
-        logger.info("✅ Connected to MongoDB")
     except Exception as e:
         logger.error(f"❌ MongoDB Connection Error: {e}")
         db = None
 else:
-    logger.warning("🚨 MONGO_URL not found! Server will run, but chat history won't be saved.")
     db = None
 
-# ── Gemini Setup ─────────────────────────────────────────────────────────────
-# This pulls the key from your Render Environment Variables
+# ── Gemini Setup (THE MAGIC FIX) ─────────────────────────────────────────────
 api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    logger.error("❌ GEMINI_API_KEY is missing from environment variables!")
-
 genai.configure(api_key=api_key)
+
+# 1. Ask Google what models we are actually allowed to use
+working_model_name = "models/gemini-1.5-flash" # default fallback
+try:
+    print("\n🔍 SCANNING FOR ALLOWED GEMINI MODELS...")
+    valid_models = []
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            valid_models.append(m.name)
+    
+    print(f"✅ Google says we can use: {valid_models}")
+    
+    # 2. Auto-select the first working model from the list!
+    if valid_models:
+        working_model_name = valid_models[0]
+        print(f"🚀 AUTO-SELECTING: {working_model_name}\n")
+except Exception as e:
+    print(f"⚠️ Could not auto-fetch models: {e}\n")
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -55,28 +67,16 @@ ABOUT ABNEL:
 - Personality: curious, hands-on, loves shipping products
 - Status: Open for work
 
-CORE SKILLS:
-- React, Next.js, Node.js, MongoDB, Tailwind CSS
-- JavaScript (ES6+), Three.js / React Three Fiber
-- Git, DevOps basics, Video Editing
-
-PROJECTS:
-1. NewarPrime — Abnel's flagship learn & earn ecosystem.
-2. Real-time Chat App — WebSocket-based chat with rooms.
-3. Data Visualization Dashboard — Interactive D3.js charts.
-
 HOW TO RESPOND:
 - Keep responses short (1-3 sentences).
 - Speak about Abnel in the third person.
-- If asked something outside Abnel's portfolio, politely steer back.
-- For contact, point them to the Contact form below.
+- Point to the contact form for hiring inquiries.
 """
 
-# Gemini Configuration
-generation_config = {"temperature": 0.7, "max_output_tokens": 1024}
+# 3. Initialize the model with the auto-detected name!
 model = genai.GenerativeModel(
-    model_name="gemini-3-flash", 
-    generation_config=generation_config,
+    model_name=working_model_name,
+    generation_config={"temperature": 0.7, "max_output_tokens": 1024},
     system_instruction=ABNEL_SYSTEM_PROMPT
 )
 
@@ -116,33 +116,26 @@ async def root():
 async def chat(req: ChatRequest):
     session_id = req.session_id or f"abnel-{uuid.uuid4()}"
 
-    # 1. Load history from MongoDB (if connected)
     gemini_history = []
     if db is not None:
         try:
             history_docs = await db.chat_messages.find(
                 {"session_id": session_id}, {"_id": 0}
             ).sort("ts", 1).to_list(20)
-
             for h in history_docs:
                 role = "model" if h.get("role") == "assistant" else "user"
                 gemini_history.append({"role": role, "parts": [h["content"]]})
-        except Exception as e:
-            logger.error(f"Error loading history: {e}")
+        except Exception:
+            pass
 
-    # 2. Get Gemini Response
     try:
-        # Standard synchronous send_message is often more stable in Render's Uvicorn loop
         chat_session = model.start_chat(history=gemini_history)
         response = chat_session.send_message(req.message) 
         reply = response.text
     except Exception as e:
-        # This print statement will show up in your Render Logs!
-        print(f"DEBUG: Detailed Gemini Error: {type(e).__name__} - {e}")
-        logger.exception("Gemini API error")
-        raise HTTPException(status_code=502, detail="AI Communication Error")
+        print(f"REAL ERROR DURING CHAT: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"AI error: {str(e)}")
 
-    # 3. Save to MongoDB (if connected)
     if db is not None:
         try:
             now = datetime.now(timezone.utc).isoformat()
@@ -150,17 +143,30 @@ async def chat(req: ChatRequest):
                 {"session_id": session_id, "role": "user", "content": req.message, "ts": now},
                 {"session_id": session_id, "role": "assistant", "content": reply, "ts": now},
             ])
-        except Exception as e:
-            logger.error(f"Error saving history: {e}")
+        except Exception:
+            pass
 
     return ChatResponse(session_id=session_id, reply=reply)
+
+@api_router.post("/contact", response_model=ContactResponse)
+async def contact(req: ContactRequest):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": req.name,
+        "email": req.email,
+        "message": req.message,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    if db is not None:
+        await db.contact_messages.insert_one(doc)
+    return ContactResponse(id=doc["id"], ok=True)
 
 # ── App setup ────────────────────────────────────────────────────────────────
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Wide open for testing, can be restricted to your Netlify URL later
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
