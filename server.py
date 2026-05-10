@@ -75,7 +75,7 @@ HOW TO RESPOND:
 # Gemini Configuration
 generation_config = {"temperature": 0.7, "max_output_tokens": 1024}
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash", # Use models/ prefix for stability
+    model_name="gemini-pro", 
     generation_config=generation_config,
     system_instruction=ABNEL_SYSTEM_PROMPT
 )
